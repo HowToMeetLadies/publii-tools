@@ -1,0 +1,268 @@
+#!/bin/bash
+
+# publii-check.sh - Diagnostic and sandbox analysis tool for Publii
+# Copyright (C) 2025 HowToMeetLadies
+#
+# https://github.com/HowToMeetLadies/publii-tools
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+
+echo -e " ▄▄▄·▄• ▄▌▄▄▄▄· ▄▄▌  ▪  ▪   ▄▄·  ▄ .▄▄▄▄ . ▄▄· ▄ •▄ "
+echo -e "▐█ ▄██▪██▌▐█ ▀█▪██•  ██ ██ ▐█ ▌▪██▪▐█▀▄.▀·▐█ ▌▪█▌▄▌▪"
+echo -e " ██▀·█▌▐█▌▐█▀▀█▄██▪  ▐█·▐█·██ ▄▄██▀▐█▐▀▀▪▄██ ▄▄▐▀▀▄·"
+echo -e "▐█▪·•▐█▄█▌██▄▪▐█▐█▌▐▌▐█▌▐█▌▐███▌██▌▐▀▐█▄▄▌▐███▌▐█.█▌"
+echo -e ".▀    ▀▀▀ ·▀▀▀▀ .▀▀▀ ▀▀▀▀▀▀·▀▀▀ ▀▀▀ · ▀▀▀ ·▀▀▀ ·▀  ▀"
+echo -e "                                              v0.3.0"
+echo
+echo
+
+# --- User & Environment Check --- #
+# Check if run with sudo
+if [ -n "$SUDO_USER" ]; then
+    echo "Invoked with: sudo"
+    echo "Original user: $SUDO_USER"
+fi
+echo "👤 USER DETAILS"
+echo "-----------"
+
+if [ "$EUID" -eq 0 ]; then
+    echo "Running as: root"
+else
+    echo "Running as: $(whoami)"
+fi
+
+echo "Home directory: $HOME"
+
+# Universal Publii diagnostic script (English)
+# Compatible with all major Linux distributions
+
+set -e
+
+### --- [0] Hardware & CPU Info --- ###
+echo
+echo "💡 MACHINE INFO"
+echo "-------------------------"
+
+# General system info
+echo "uname -a: $(uname -a)"
+
+# CPU model
+CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo | cut -d ':' -f2 | sed 's/^ *//')
+echo "CPU Model: $CPU_MODEL"
+
+# CPU architecture
+ARCH=$(uname -m)
+echo "Architecture: $ARCH"
+
+# Number of cores
+CORES=$(nproc)
+echo "CPU Cores: $CORES"
+
+# CPU flags (shortened to common sandbox-related ones)
+CPU_FLAGS=$(grep -m1 'flags' /proc/cpuinfo | cut -d ':' -f2 | grep -Eo 'vmx|svm|tsx|nx|smep|smap' | tr '\n' ' ')
+echo "CPU Flags: $CPU_FLAGS"
+
+# Virtualization (basic check)
+if command -v systemd-detect-virt >/dev/null 2>&1; then
+    VIRT=$(systemd-detect-virt)
+    echo "Virtualization: $VIRT"
+fi
+
+### --- [1] System & Runtime Information --- ###
+echo
+echo "🖥️ SYSTEM INFO"
+echo "-------------------------"
+
+# OS Info
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    echo "OS: $NAME $VERSION ($ID)"
+else
+    echo "OS: Unknown"
+fi
+
+# Desktop Environment
+DE="${XDG_CURRENT_DESKTOP:-${DESKTOP_SESSION:-Unknown}}"
+echo "Desktop Environment: $DE"
+
+# Window Manager Detection
+WM="Unknown"
+if [ -n "$DISPLAY" ]; then
+    WM_ID=$(xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -oE '[0-9]+')
+    if [ -n "$WM_ID" ]; then
+        WM=$(xprop -id "$WM_ID" -notype -f _NET_WM_NAME 8t _NET_WM_NAME 2>/dev/null | cut -d '"' -f 2)
+    fi
+elif [ "$XDG_SESSION_TYPE" = "wayland" ]; then
+    for name in sway kwin_wayland mutter weston; do
+        if pgrep -x $name >/dev/null; then WM="$name (Wayland)"; break; fi
+    done
+fi
+echo "Window Manager: $WM"
+
+# Sandbox Systems
+echo -n "Sandbox Tools Installed: "
+found=""
+for tool in flatpak snap bwrap firejail apparmor selinux; do
+    if command -v $tool >/dev/null 2>&1; then found+="$tool "; fi
+done
+if [ -n "$found" ]; then
+    echo "$found"
+else
+    echo "None"
+fi
+
+### --- [2] Detect Publii Installation --- ###
+echo
+echo "📦 INSTALL TYPE"
+echo "-------------------------"
+INSTALL_TYPE="Unknown"
+APPIMAGE_PATH=""
+
+if [ -f /opt/Publii/Publii ]; then
+    INSTALL_TYPE="DEB or RPM"
+    echo "Installation: DEB or RPM at /opt/Publii/Publii"
+else
+    APPIMAGE_PATH=$(find ~ -iname 'Publii*.AppImage' 2>/dev/null | head -n1)
+    if [ -n "$APPIMAGE_PATH" ]; then
+        INSTALL_TYPE="AppImage"
+        echo "Installation: AppImage at $APPIMAGE_PATH"
+    else
+        echo "Installation type could not be determined."
+    fi
+fi
+
+### --- [3] Generate Checksums --- ###
+echo
+echo "🔐 CHECKSUMS"
+echo "-------------------------"
+
+if [ "$INSTALL_TYPE" = "DEB or RPM" ]; then
+    BINARY="/opt/Publii/Publii"
+    if [ -f "$BINARY" ]; then
+        echo "Executable: $BINARY"
+        echo "MD5 : $(md5sum "$BINARY" | awk '{print $1}')"
+        echo "SHA1: $(sha1sum "$BINARY" | awk '{print $1}')"
+    fi
+
+    echo -n "Looking for archive file... "
+    ARCHIVE=$(find ~/Downloads ~/ -maxdepth 2 \( -iname 'publii*.deb' -o -iname 'publii*.rpm' \) 2>/dev/null | head -n1)
+    if [ -n "$ARCHIVE" ]; then
+        echo "Found: $ARCHIVE"
+        echo "MD5 : $(md5sum "$ARCHIVE" | awk '{print $1}')"
+        echo "SHA1: $(sha1sum "$ARCHIVE" | awk '{print $1}')"
+    else
+        echo "Not found."
+    fi
+
+elif [ "$INSTALL_TYPE" = "AppImage" ]; then
+    if [ -f "$APPIMAGE_PATH" ]; then
+        echo "AppImage: $APPIMAGE_PATH"
+        echo "MD5 : $(md5sum "$APPIMAGE_PATH" | awk '{print $1}')"
+        echo "SHA1: $(sha1sum "$APPIMAGE_PATH" | awk '{print $1}')"
+    fi
+fi
+
+### --- [4] Publii Runtime Check --- ###
+echo
+echo "🚀 RUNTIME INFO"
+echo "-------------------------"
+
+# Electron sandbox compatibility check (moved here)
+echo -n "Checking Electron sandbox compatibility... "
+CHROME_SANDBOX="/opt/Publii/chrome-sandbox"
+if [ -f "$CHROME_SANDBOX" ]; then
+    PERMS=$(stat -c "%A %U" "$CHROME_SANDBOX")
+    if echo "$PERMS" | grep -q '^-rws' && echo "$PERMS" | grep -q ' root$'; then
+        echo "✅ chrome-sandbox is setuid root as required."
+    else
+        echo "❌ chrome-sandbox permissions incorrect (should be setuid root)."
+        echo "Permissions: $PERMS"
+    fi
+else
+    echo "⚠️ chrome-sandbox not found at $CHROME_SANDBOX"
+fi
+
+PUBLIIPID=$(ps -eo pid,cmd | grep -i 'publii' | grep -vE "$(basename $0)|$$|grep" | awk '{print $1}' || true)
+
+if [ -z "$PUBLIIPID" ]; then
+    echo "Publii is not currently running."
+    echo "What do you want to do?"
+    echo "  [1] Start Publii now"
+    echo "  [2] I will start it myself"
+    echo "  [3] Enter Publii PID manually"
+    echo "  [4] Cancel"
+    read -rp "Choose [1/2/3/4]: " CHOICE
+
+    if [ "$CHOICE" = "1" ]; then
+        echo "Attempting to start Publii..."
+        DESKTOP_FILE=$(grep -irl 'Exec=.*Publii' ~/.local/share/applications/ /usr/share/applications/ 2>/dev/null | head -n1)
+        if [ -n "$DESKTOP_FILE" ]; then
+            EXEC_LINE=$(grep -i '^Exec=' "$DESKTOP_FILE" | head -n1 | cut -d '=' -f2-)
+            nohup "$EXEC_LINE" >/dev/null 2>&1 &
+            echo "Started using: $EXEC_LINE"
+        elif [ -n "$APPIMAGE_PATH" ]; then
+            nohup "$APPIMAGE_PATH" >/dev/null 2>&1 &
+            echo "Started AppImage: $APPIMAGE_PATH"
+        else
+            echo "Could not find a launch command. Start Publii manually."
+        fi
+        echo "Waiting for Publii to launch..."
+        while [ -z "$(ps -eo pid,cmd | grep -i 'publii' | grep -vE "$(basename $0)|$$|grep")" ]; do sleep 1; done
+        PUBLIIPID=$(ps -eo pid,cmd | grep -i 'publii' | grep -vE "$(basename $0)|$$|grep" | awk '{print $1}')
+    elif [ "$CHOICE" = "2" ]; then
+        echo "Waiting for you to start Publii..."
+                while [ -z "$(ps -eo pid,cmd | grep -i 'publii' | grep -vE "$(basename $0)|$$|grep")" ]; do sleep 1; done
+        PUBLIIPID=$(ps -eo pid,cmd | grep -i 'publii' | grep -vE "$(basename $0)|$$|grep" | awk '{print $1}')
+    elif [ "$CHOICE" = "3" ]; then
+        read -rp "Enter PID of Publii process: " PUBLIIPID
+        if [ -z "$PUBLIIPID" ] || ! ps -p "$PUBLIIPID" > /dev/null 2>&1; then
+            echo "❌ Invalid or non-existent PID. Aborting."
+            exit 1
+        fi
+    else
+        echo "Aborted by user."
+        exit 0
+    fi
+else
+    echo "Publii is already running (PID: $PUBLIIPID)"
+fi
+
+### --- [5] Analyze Running Process --- ###
+echo
+echo "🔍 SANDBOX & ENVIRONMENT"
+echo "-------------------------"
+
+for PID in $PUBLIIPID; do
+    echo "Inspecting PID $PID..."
+    CMD=$(ps -p $PID -o args=)
+    echo "Command line: $CMD"
+
+    if echo "$CMD" | grep -qiE 'flatpak|snap|bwrap'; then
+        echo "⚠️ Publii appears to be sandboxed!"
+    else
+        echo "✅ No sandbox indicators detected."
+    fi
+
+    echo "🔬 Environment variables for PID $PID:"
+    echo "-------------------------------------"
+    tr '\0' '\n' < /proc/$PID/environ | sed 's/^/   /'
+    echo
+    
+    echo "-------------------------------------"
+
+done
+
+### --- Done --- ###
+echo "✅ Done."
