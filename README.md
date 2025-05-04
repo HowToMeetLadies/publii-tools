@@ -26,6 +26,22 @@ Helps users verify installation integrity, environment compatibility, and sandbo
 
 ---
 
+### [`publii-dump`](./publii-dump)
+
+A Python-based export tool that extracts content and metadata from Publii projects.  
+Useful for backups, migrations, or external processing of Publii sites.
+
+* Exports posts and pages with status (published/drafts)
+* Supports Markdown, WYSIWYG, and Block editors
+* Preserves author and tag relationships
+* Optionally includes featured and inline images (with metadata)
+* Structured output with per-post metadata
+* Reports missing images without failing
+
+👉 See the full documentation in [`publii-dump/README.md`](./publii-dump/README.md)
+
+---
+
 ## 🔒 License
 
 This project is licensed under the [GPLv3](https://www.gnu.org/licenses/gpl-3.0.html).
