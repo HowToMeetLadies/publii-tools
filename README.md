@@ -2,8 +2,8 @@
 
 A collection of tools and diagnostics for [Publii](https://getpublii.com/).
 
-**Author:** [HowToMeetLadies](https://github.com/HowToMeetLadies)
-**License:** GPLv3
+**Author:** [HowToMeetLadies](https://github.com/HowToMeetLadies)  
+**License:** GPLv3  
 **Status:** Actively maintained
 
 ---
@@ -12,7 +12,7 @@ A collection of tools and diagnostics for [Publii](https://getpublii.com/).
 
 ### [`publii-check`](./publii-check)
 
-A diagnostic and sandbox-inspection tool for Publii on Linux systems.
+A diagnostic and sandbox-inspection tool for Publii on Linux systems.  
 Helps users verify installation integrity, environment compatibility, and sandbox status.
 
 * Detects Publii installations (AppImage, DEB, RPM)
@@ -42,6 +42,47 @@ Useful for backups, migrations, or external processing of Publii sites.
 
 ---
 
+### [`publii-clean`](./publii-clean)
+
+🧼 A simple shell tool to clean up temporary directories in Publii sites.
+
+* Removes build leftovers like `output/`, `preview/`, and `*-files` folders
+* Supports dry-run and interactive confirmation
+* Filtering by type: include/exclude specific folder categories
+* Safe defaults: no destructive actions without confirmation
+
+👉 See the full documentation in [`publii-clean/README.md`](./publii-clean/README.md)
+
+---
+
+### [`publii-shrink`](./publii-shrink)
+
+🧹 A shell tool to detect and optionally delete unreferenced media files in Publii site projects.
+
+* Scans `input/media/posts/<post_id>/` and compares filenames against the database
+* Supports dry-run mode and safe deletion of files
+* Optionally removes `responsive/` subfolders when appropriate
+* Summarizes unreferenced file counts by post and in total
+* Bash-only, minimal dependencies (`sqlite3`)
+
+👉 See the full documentation in [`publii-shrink/README.md`](./publii-shrink/README.md)
+
+---
+
+### [`publii-tags`](./publii-tags)
+
+🏷️ A Python CLI tool to list, add, replace, or clear tags from posts in a Publii database.
+
+* Works directly on the `db.sqlite` file in a Publii site
+* Supports `--append`, `--replace`, and `--clear`
+* Default mode lists tags per post
+* Operates on specific post IDs or all posts
+* Validates tags and aborts if unknown slugs are passed
+
+👉 See the full documentation in [`publii-tags/README.md`](./publii-tags/README.md)
+
+---
+
 ## 🔒 License
 
 This project is licensed under the [GPLv3](https://www.gnu.org/licenses/gpl-3.0.html).
@@ -50,6 +91,6 @@ This project is licensed under the [GPLv3](https://www.gnu.org/licenses/gpl-3.0.
 
 ## 🚧 Roadmap
 
-More tools may follow..
+More tools may follow...
 
 Contributions welcome via PR or issue!

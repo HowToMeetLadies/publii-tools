@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+
+import argparse
+import sqlite3
+import sys
+from pathlib import Path
+
+def get_post_ids(conn, ids_arg, all_posts):
+    if all_posts:
+        return [row[0] for row in conn.execute("SELECT id FROM posts")]
+    elif ids_arg:
+        return [int(i.strip()) for i in ids_arg.split(",") if i.strip().isdigit()]
+    else:
+        return []
+
+def get_tag_id(conn, slug):
+    row = conn.execute("SELECT id FROM tags WHERE slug = ?", (slug,)).fetchone()
+    return row[0] if row else None
+
+def normalize_tag_slugs(slug_args):
+    slugs = []
+    for s in slug_args:
+        slugs.extend([part.strip() for part in s.split(",") if part.strip()])
+    return slugs
+
+def check_tags_exist(conn, slugs):
+    slugs = normalize_tag_slugs(slugs)
+    missing = [slug for slug in slugs if not get_tag_id(conn, slug)]
+    if missing:
+        print(f"❌ The following tags do not exist in the database: {', '.join(missing)}", file=sys.stderr)
+        sys.exit(1)
+    return slugs
+
+def get_existing_tag_ids(conn, post_id):
+    return {row[0] for row in conn.execute("SELECT tag_id FROM posts_tags WHERE post_id = ?", (post_id,))}
+
+def clear_tags(conn, post_id):
+    conn.execute("DELETE FROM posts_tags WHERE post_id = ?", (post_id,))
+
+def list_tags(conn, post_ids):
+    for post_id in post_ids:
+        slugs = [
+            row[0] for row in conn.execute(
+                "SELECT tags.slug FROM tags "
+                "JOIN posts_tags ON tags.id = posts_tags.tag_id "
+                "WHERE posts_tags.post_id = ?", (post_id,))
+        ]
+        print(f"📝 Post {post_id}: {', '.join(slugs) if slugs else '🚫 no tags'}")
+
+def append_tags(conn, post_ids, tag_slugs):
+    for post_id in post_ids:
+        existing = get_existing_tag_ids(conn, post_id)
+        for slug in tag_slugs:
+            tag_id = get_tag_id(conn, slug)
+            if tag_id not in existing:
+                conn.execute("INSERT INTO posts_tags (post_id, tag_id) VALUES (?, ?)", (post_id, tag_id))
+                print(f"➕ Added tag '{slug}' to post {post_id}")
+
+def replace_tags(conn, post_ids, tag_slugs):
+    for post_id in post_ids:
+        clear_tags(conn, post_id)
+        print(f"♻️ Removed all tags from post {post_id}")
+        for slug in tag_slugs:
+            tag_id = get_tag_id(conn, slug)
+            conn.execute("INSERT INTO posts_tags (post_id, tag_id) VALUES (?, ?)", (post_id, tag_id))
+            print(f"✅ Added tag '{slug}' to post {post_id}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="🏷️ Manage tags in Publii posts via SQLite.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("db", help="📄 Path to the Publii db.sqlite file")
+    parser.add_argument("--append", action="store_true", help="➕ Add tags to selected posts (existing ones remain)")
+    parser.add_argument("--replace", action="store_true", help="♻️ Replace all tags in selected posts with the given tags")
+    parser.add_argument("--clear", action="store_true", help="🧹 Remove all tags from selected posts")
+    parser.add_argument("--post-ids", help="🔢 Comma-separated list of post IDs (e.g. 1,2,3)")
+    parser.add_argument("--all", action="store_true", help="📌 Apply operation to all posts")
+    parser.add_argument("tags", nargs="*", help="🏷️ Tag slugs to apply (e.g. tech,news or tech news)")
+
+    args = parser.parse_args()
+
+    if not (args.append or args.replace or args.clear):
+        default_to_list = True
+    else:
+        default_to_list = False
+
+    db_path = Path(args.db).expanduser().resolve()
+
+    if not db_path.exists():
+        print(f"❌ Database file not found: {db_path}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+    except Exception as e:
+        print(f"❌ Failed to open database: {e}", file=sys.stderr)
+        return
+
+    try:
+        post_ids = get_post_ids(conn, args.post_ids, args.all)
+        if not post_ids:
+            print("⚠️ No valid post IDs found.", file=sys.stderr)
+            return
+
+        if args.append or args.replace:
+            args.tags = check_tags_exist(conn, args.tags)
+
+        if args.clear:
+            for pid in post_ids:
+                clear_tags(conn, pid)
+                print(f"🧹 Cleared tags from post {pid}")
+            conn.commit()
+        elif args.replace:
+            replace_tags(conn, post_ids, args.tags)
+            conn.commit()
+        elif args.append:
+            append_tags(conn, post_ids, args.tags)
+            conn.commit()
+        elif default_to_list:
+            list_tags(conn, post_ids)
+    finally:
+        conn.close()
+
+if __name__ == "__main__":
+    main()

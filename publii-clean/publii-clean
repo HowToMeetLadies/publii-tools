@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# publii-clean 🧹: Cleans temporary/published directories from Publii sites
+
+set -euo pipefail
+
+show_help() {
+  cat <<EOF
+Usage: publii-clean [OPTIONS] <PUBLII_DIR> 🧼
+
+Removes specific directories ('output', 'preview', '*-files') from all sites
+under <PUBLII_DIR>/sites/.
+
+Options:
+  --output           🗑️  Remove only 'output' directories
+  --preview          🗑️  Remove only 'preview' directories
+  --deploy           🗑️  Remove only '*-files' directories
+  --no-output        🚫 Exclude 'output' directories from cleaning
+  --no-preview       🚫 Exclude 'preview' directories from cleaning
+  --no-deploy        🚫 Exclude '*-files' directories from cleaning
+  --dry-run          🔍 Show what would be deleted, without deleting anything
+  -i, --interactive  ❓ Prompt before cleaning each site
+  --help             📖 Show this help message and exit
+
+Note:
+  If any positive filter (--output, --preview, --deploy) is used, only those types will be removed.
+  If only negative filters are used, all types except the excluded ones are removed.
+EOF
+}
+
+# Defaults
+DRY_RUN=false
+INTERACTIVE=false
+INCLUDE_TYPES=()
+EXCLUDE_TYPES=()
+
+# Parse arguments
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true; shift ;;
+    -i|--interactive) INTERACTIVE=true; shift ;;
+    --output) INCLUDE_TYPES+=("output"); shift ;;
+    --preview) INCLUDE_TYPES+=("preview"); shift ;;
+    --deploy) INCLUDE_TYPES+=("deploy"); shift ;;
+    --no-output) EXCLUDE_TYPES+=("output"); shift ;;
+    --no-preview) EXCLUDE_TYPES+=("preview"); shift ;;
+    --no-deploy) EXCLUDE_TYPES+=("deploy"); shift ;;
+    --help) show_help; exit 0 ;;
+    -*)
+      echo "❗ Unknown option: $1" >&2
+      show_help
+      exit 1
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set -- "${POSITIONAL[@]}"
+if [[ $# -ne 1 ]]; then
+  echo "❗ Error: You must specify exactly one directory (PUBLII_DIR)." >&2
+  show_help
+  exit 1
+fi
+
+PUBLII_DIR="$1"
+SITE_ROOT="$PUBLII_DIR/sites"
+
+if [[ ! -d "$SITE_ROOT" ]]; then
+  echo "❗ Error: Directory $SITE_ROOT does not exist." >&2
+  exit 1
+fi
+
+echo "🧹 Cleaning sites in: $SITE_ROOT"
+[[ "$DRY_RUN" == true ]] && echo "🔍 Dry-run mode active"
+[[ "$INTERACTIVE" == true ]] && echo "❓ Interactive mode active"
+
+should_clean_type() {
+  local type="$1"
+  if [[ "${#INCLUDE_TYPES[@]}" -gt 0 ]]; then
+    [[ " ${INCLUDE_TYPES[*]} " =~ " ${type} " ]]
+  else
+    ! [[ " ${EXCLUDE_TYPES[*]} " =~ " ${type} " ]]
+  fi
+}
+
+# Loop through each site
+find "$SITE_ROOT" -mindepth 1 -maxdepth 1 -type d | while read -r site; do
+  SITENAME=$(basename "$site")
+  echo "→ Checking: $SITENAME"
+
+  if [[ "$INTERACTIVE" == true ]]; then
+    while true; do
+      echo -n "   Clean this site? [y]es / [n]o / [a]bort: "
+      read -r choice < /dev/tty
+      case "$choice" in
+        [yY]) break ;;
+        [nN]) echo "   ⚠️  Skipped."; continue 2 ;;
+        [aA]) echo "🛑 Aborted."; exit 1 ;;
+        *) echo "   Please enter y, n or a." ;;
+      esac
+    done
+  fi
+
+  # Clean 'output'
+  if should_clean_type "output" && [[ -d "$site/output" ]]; then
+    echo "   🗑️  Removing: output"
+    [[ "$DRY_RUN" == true ]] || rm -rf "$site/output"
+  fi
+
+  # Clean 'preview'
+  if should_clean_type "preview" && [[ -d "$site/preview" ]]; then
+    echo "   🗑️  Removing: preview"
+    [[ "$DRY_RUN" == true ]] || rm -rf "$site/preview"
+  fi
+
+  # Clean '*-files'
+  if should_clean_type "deploy"; then
+    find "$site" -maxdepth 1 -type d -name '*-files' | while read -r fdir; do
+      echo "   🗑️  Removing: $(basename "$fdir")"
+      [[ "$DRY_RUN" == true ]] || rm -rf "$fdir"
+    done
+  fi
+done
+
+echo "✅ Cleanup completed."

@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Default options
+DRY_RUN=true
+DELETE=false
+RESPONSIVE=false
+FORCE_RESPONSIVE=false
+
+print_help() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] <PUBLII_DIR>
+
+Find and optionally delete unreferenced post media files in Publii projects.
+
+Options:
+  --dry-run           Default mode. Show which files would be deleted, but do not delete them.
+  --delete            Actually delete unreferenced files (ignored if --dry-run is active).
+  --responsive        Delete the 'responsive/' folder only if other files in the same post are deleted.
+  --force-responsive  Always delete the 'responsive/' folder, even if no other files are deleted.
+  --help              Show this help message and exit.
+
+Example:
+  $(basename "$0") --delete --responsive /path/to/publii
+EOF
+}
+
+# Argument parsing
+ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true ;;
+    --delete) DELETE=true ;;
+    --responsive) RESPONSIVE=true ;;
+    --force-responsive) FORCE_RESPONSIVE=true ;;
+    --help) print_help; exit 0 ;;
+    -*) echo "❌ Unknown option: $1" >&2; exit 1 ;;
+    *) ARGS+=("$1") ;;
+  esac
+  shift
+done
+
+if [[ ${#ARGS[@]} -ne 1 ]]; then
+  echo "❌ Error: You must provide exactly one Publii directory."
+  echo "ℹ️  Try --help for usage information."
+  exit 1
+fi
+
+PUBLII_DIR="${ARGS[0]}"
+
+if [[ ! -d "$PUBLII_DIR" ]]; then
+  echo "❌ Error: '$PUBLII_DIR' is not a valid directory."
+  exit 1
+fi
+
+# Summary counters
+declare -A summary_counts
+total_count=0
+
+find_unreferenced_files() {
+  local site_path="$1"
+  local db_path="$site_path/input/db.sqlite"
+  local media_root="$site_path/input/media/posts"
+
+  if [[ ! -f "$db_path" ]]; then
+    echo "⚠️  Skipping: No database found in $site_path"
+    return
+  fi
+
+  echo "🔍 Scanning site: $site_path"
+
+  # Fetch referenced image filenames from the database
+  declare -A referenced_files_by_post
+  while IFS='|' read -r post_id filename; do
+    referenced_files_by_post["$post_id"]+="$filename"$'\n'
+  done < <(sqlite3 -separator '|' "$db_path" "SELECT post_id, url FROM posts_images WHERE url IS NOT NULL;")
+
+  # Iterate over each post media folder
+  for post_dir in "$media_root"/*/; do
+    [[ -d "$post_dir" ]] || continue
+    post_dir="${post_dir%/}"  # Remove trailing slash
+    post_id=$(basename "$post_dir")
+    referenced_files="${referenced_files_by_post[$post_id]}"
+    found_unreferenced=false
+    files_to_delete=()
+
+    while IFS= read -r -d '' file; do
+      rel_file="${file#$post_dir}"
+      rel_file="${rel_file#/}"  # Remove leading slash
+      [[ "$rel_file" == responsive/* ]] && continue
+
+      if ! grep -Fxq "$rel_file" <<< "$referenced_files"; then
+        files_to_delete+=("$file")
+        found_unreferenced=true
+      fi
+    done < <(find "$post_dir" -type f -print0)
+
+    if [[ ${#files_to_delete[@]} -gt 0 ]]; then
+      echo "📂 Unreferenced files in post $post_id:"
+      for file in "${files_to_delete[@]}"; do
+        echo "  🗃️  $file"
+        summary_counts["$post_id"]=$(( ${summary_counts["$post_id"]:-0} + 1 ))
+        total_count=$((total_count + 1))
+        $DRY_RUN || rm -f -- "$file"
+      done
+    fi
+
+    # Handle responsive/ folder deletion
+    responsive_dir="$post_dir/responsive"
+    if [[ -d "$responsive_dir" ]]; then
+      if $FORCE_RESPONSIVE || { $RESPONSIVE && $found_unreferenced; }; then
+        echo "🧹 Deleting responsive folder in post $post_id: $responsive_dir"
+        summary_counts["$post_id"]=$(( ${summary_counts["$post_id"]:-0} + 1 ))
+        total_count=$((total_count + 1))
+        $DRY_RUN || rm -rf -- "$responsive_dir"
+      fi
+    fi
+  done
+}
+
+# Process each site
+for site_dir in "$PUBLII_DIR"/sites/*; do
+  [[ -d "$site_dir" ]] || continue
+  find_unreferenced_files "$site_dir"
+done
+
+# Print summary
+echo
+if [[ ${#summary_counts[@]} -gt 0 ]]; then
+  echo "📊 ========= SUMMARY ========="
+  for pid in "${!summary_counts[@]}"; do
+    echo "📝 Post $pid: ${summary_counts[$pid]} unreferenced file(s)"
+  done
+  echo "📦 Total: $total_count unreferenced file(s)"
+  echo "=============================="
+else
+  echo "✅ No unreferenced files found."
+fi
+
+echo
+
+# Final status message
+if $DRY_RUN; then
+  echo "🧪 Dry-run complete. No files were deleted."
+else
+  echo "✅ Deletion complete."
+fi
