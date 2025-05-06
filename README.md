@@ -83,6 +83,20 @@ Useful for backups, migrations, or external processing of Publii sites.
 
 ---
 
+### [`publii-press`](./publii-press)
+
+📤 A Python tool to convert WordPress WXR exports into Publii-compatible projects.
+
+* Imports authors, tags, categories, posts, and pages
+* Downloads and assigns featured + inline media
+* Maps categories as tags (`category-<slug>`) and links them as `mainTag`
+* Automatically generates `pages.config.json`
+* Supports `--dry-run` mode
+
+👉 See the full documentation in [`publii-press/README.md`](./publii-press/README.md)
+
+---
+
 ## 🔒 License
 
 This project is licensed under the [GPLv3](https://www.gnu.org/licenses/gpl-3.0.html).

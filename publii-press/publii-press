@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import sqlite3
+import xml.etree.ElementTree as ET
+import urllib.request
+import shutil
+import re
+from collections import defaultdict
+import json
+import mimetypes
+
+VERSION = "1.0.0"
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Convert WXR to Publii project")
+    parser.add_argument("wxr_file", help="Path to WXR file")
+    parser.add_argument("db_file", help="Path to Publii db.sqlite")
+    parser.add_argument("--version", action="version", version=f"publii-press {VERSION}")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--authors", dest="authors", action="store_true", default=True)
+    parser.add_argument("--no-authors", dest="authors", action="store_false")
+    parser.add_argument("--tags", dest="tags", action="store_true", default=True)
+    parser.add_argument("--no-tags", dest="tags", action="store_false")
+    parser.add_argument("--media", dest="media", action="store_true", default=True)
+    parser.add_argument("--no-media", dest="media", action="store_false")
+    parser.add_argument("--posts", dest="posts", action="store_true", default=True)
+    parser.add_argument("--no-posts", dest="posts", action="store_false")
+    parser.add_argument("--pages", dest="pages", action="store_true", default=True)
+    parser.add_argument("--no-pages", dest="pages", action="store_false")
+    return parser.parse_args()
+
+def validate_schema(conn):
+    required = {"authors", "posts", "posts_additional_data", "posts_images", "posts_tags", "tags", "sqlite_sequence"}
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    present = {r[0] for r in cur.fetchall()}
+    if not required.issubset(present):
+        raise RuntimeError(f"[SCHEMA:ERROR] Missing tables: {', '.join(required - present)}")
+    for table in ["posts", "posts_additional_data", "posts_images", "posts_tags", "tags"]:
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        if cur.fetchone()[0] != 0:
+            raise RuntimeError(f"[SCHEMA:ERROR] Table '{table}' must be empty")
+
+def ensure_media_dir(db_path):
+    path = os.path.join(os.path.dirname(db_path), "media", "posts")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def extract_slug(link):
+    match = re.match(r"https?://[^/]+/(.+)$", link)
+    return re.sub(r"[^a-zA-Z0-9\-_]", "-", match.group(1)) if match else None
+
+def get_text(el, path):
+    found = el.find(path)
+    return found.text if found is not None else ""
+
+def prompt_media_action(filename, url):
+    print(f"[MEDIA] File exists: {filename}\n       Source: {url}")
+    return input("[r]e-use / [o]verwrite / [n]ew-name / [x]abort: ").strip().lower()
+
+def download_media_with_prompt(url, target_path, dry_run):
+    base, ext = os.path.splitext(target_path)
+    if ext == "":
+        try:
+            with urllib.request.urlopen(url) as response:
+                content_type = response.info().get_content_type()
+                guessed_ext = mimetypes.guess_extension(content_type)
+                if guessed_ext:
+                    target_path = base + guessed_ext
+        except Exception:
+            pass
+
+    while os.path.exists(target_path):
+        choice = prompt_media_action(os.path.basename(target_path), url)
+        if choice == "r":
+            return target_path
+        elif choice == "o":
+            break
+        elif choice == "n":
+            while True:
+                new_name = input("Enter new filename: ").strip()
+                new_path = os.path.join(os.path.dirname(target_path), new_name)
+                if not os.path.exists(new_path):
+                    target_path = new_path
+                    break
+                print(f"[WARN] File '{new_name}' already exists.")
+        elif choice == "x":
+            print("[ABORT] User aborted due to media conflict.")
+            exit(1)
+
+    if not dry_run:
+        with urllib.request.urlopen(url) as response, open(target_path, 'wb') as out_file:
+            shutil.copyfileobj(response, out_file)
+    return target_path
+
+def main():
+    args = parse_args()
+    stats = defaultdict(int)
+    if not args.dry_run:
+        conn = sqlite3.connect(args.db_file)
+        validate_schema(conn)
+    else:
+        conn = sqlite3.connect(args.db_file)
+        validate_schema(conn)
+        conn.close()
+        conn = None
+
+    tree = ET.parse(args.wxr_file)
+    root = tree.getroot()
+    channel = root.find("channel")
+    base_dir = os.path.dirname(args.db_file)
+    media_dir = ensure_media_dir(args.db_file)
+
+    authors_map = {}
+    tags_map = {}
+    category_tags = {}
+    attachments = {}
+
+    for el in channel.findall("{http://wordpress.org/export/1.2/}author"):
+        login = get_text(el, "{http://wordpress.org/export/1.2/}author_login")
+        name = get_text(el, "{http://wordpress.org/export/1.2/}author_display_name")
+        if args.authors and not args.dry_run:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO authors (name, username) VALUES (?, ?)", (name, login))
+            authors_map[login] = cur.lastrowid
+        if args.verbose:
+            print(f"[AUTHOR] {name} imported")
+        stats['authors'] += 1
+
+    for el in channel.findall("{http://wordpress.org/export/1.2/}tag"):
+        slug = get_text(el, "{http://wordpress.org/export/1.2/}tag_slug")
+        name = get_text(el, "{http://wordpress.org/export/1.2/}tag_name")
+        if args.tags and not args.dry_run:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO tags (name, slug, description, additional_data) VALUES (?, ?, '', '')", (name, slug))
+            tags_map[slug] = cur.lastrowid
+        if args.verbose:
+            print(f"[TAG] {name} imported")
+        stats['tags'] += 1
+
+    for el in channel.findall("{http://wordpress.org/export/1.2/}category"):
+        slug = get_text(el, "{http://wordpress.org/export/1.2/}category_nicename")
+        name = get_text(el, "{http://wordpress.org/export/1.2/}cat_name")
+        tag_slug = f"category-{slug}"
+        if args.tags and not args.dry_run:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO tags (name, slug, description, additional_data) VALUES (?, ?, '', '')", (name, tag_slug))
+            category_tags[slug] = cur.lastrowid
+        if args.verbose:
+            print(f"[CATEGORY] {name} imported as tag")
+        stats['tags'] += 1
+
+    for el in channel.findall("item"):
+        if get_text(el, "{http://wordpress.org/export/1.2/}post_type") == "attachment":
+            attachments[get_text(el, "{http://wordpress.org/export/1.2/}post_id")] = (
+                get_text(el, "{http://wordpress.org/export/1.2/}post_parent"),
+                get_text(el, "{http://wordpress.org/export/1.2/}attachment_url")
+            )
+
+    # Beiträge und Seiten folgen...
+
+    for el in channel.findall("item"):
+        ptype = get_text(el, "{http://wordpress.org/export/1.2/}post_type")
+        if ptype not in ("post", "page"):
+            continue
+        if (ptype == "post" and not args.posts) or (ptype == "page" and not args.pages):
+            continue
+        title = get_text(el, "title")
+        creator = get_text(el, "{http://purl.org/dc/elements/1.1/}creator")
+        slug = extract_slug(get_text(el, "link"))
+        content = get_text(el, "{http://purl.org/rss/1.0/modules/content/}encoded")
+        created_raw = get_text(el, "{http://wordpress.org/export/1.2/}post_date")
+        modified_raw = get_text(el, "{http://wordpress.org/export/1.2/}post_date_gmt")
+        from datetime import datetime
+        def to_timestamp(dtstr):
+            try:
+                return int(datetime.strptime(dtstr, "%Y-%m-%d %H:%M:%S").timestamp() * 1000)
+            except Exception:
+                return 0
+        created = to_timestamp(created_raw.strip()) if created_raw else 0
+        modified = to_timestamp(modified_raw.strip()) if modified_raw else 0
+        wp_id = get_text(el, "{http://wordpress.org/export/1.2/}post_id")
+        status = ["published"]
+        if ptype == "page":
+            status.append("is-page")
+        author_id = authors_map.get(creator, 1)
+        main_cat = ""
+        tag_slugs = []
+        for cat in el.findall("category"):
+            if cat.attrib.get("domain") == "category" and not main_cat:
+                main_cat = cat.attrib.get("nicename")
+            elif cat.attrib.get("domain") == "post_tag":
+                tag_slugs.append(cat.attrib.get("nicename"))
+
+        if args.dry_run:
+            pid = 9999  # dummy ID for dry-run
+        else:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO posts (title, authors, slug, text, created_at, modified_at, status, template) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+                        (title, str(author_id), slug, content, created, modified, ",".join(status)))
+            pid = cur.lastrowid
+            cur.execute("INSERT INTO posts_additional_data (post_id, key, value) VALUES (?, 'postViewSettings', ?)",
+                        (pid, json.dumps({
+                            "displayDate": {"type": "select"},
+                            "displayAuthor": {"type": "select"},
+                            "displayLastUpdatedDate": {"type": "select"},
+                            "displayTags": {"type": "select"},
+                            "displayShareButtons": {"type": "select"},
+                            "displayAuthorBio": {"type": "select"},
+                            "displayPostNavigation": {"type": "select"},
+                            "displayRelatedPosts": {"type": "select"},
+                            "displayComments": {"type": "select"}
+                        })))
+            main_tag_id = category_tags.get(main_cat)
+            core = {
+                "metaTitle": title,
+                "metaDesc": "",
+                "metaRobots": "index, follow",
+                "canonicalUrl": "",
+                "editor": "tinymce",
+                "mainTag": str(main_tag_id) if main_tag_id else ""
+            }
+            cur.execute("INSERT INTO posts_additional_data (post_id, key, value) VALUES (?, '_core', ?)", (pid, json.dumps(core)))
+            for slug in tag_slugs:
+                tag_id = tags_map.get(slug) or category_tags.get(slug)
+                if tag_id:
+                    cur.execute("INSERT INTO posts_tags (tag_id, post_id) VALUES (?, ?)", (tag_id, pid))
+
+        if main_tag_id and main_tag_id not in [tags_map.get(slug) or category_tags.get(slug) for slug in tag_slugs]:
+            cur.execute("INSERT INTO posts_tags (tag_id, post_id) VALUES (?, ?)", (main_tag_id, pid))
+
+                # rewrite content URLs now that pid is known
+        for aid, (ppid, aurl) in attachments.items():
+            if ppid == wp_id:
+                fname = os.path.basename(aurl)
+                apath = os.path.join(media_dir, str(pid), fname)
+                realname = os.path.basename(apath) if os.path.exists(apath) else os.path.basename(download_media_with_prompt(aurl, apath, True))
+                content = content.replace(aurl, f"#DOMAIN_NAME#{realname}")
+
+        if not args.dry_run:
+            cur.execute("UPDATE posts SET text=? WHERE id=?", (content, pid))
+
+        if args.verbose:
+            print(f"[POST] {title} (id={pid}, published, author={creator}, tags=[{','.join(tag_slugs)}], mainTag={'category-' + main_cat if main_cat else ''})")
+
+        thumb_id = get_text(el, "{http://wordpress.org/export/1.2/}_thumbnail_id")
+        if thumb_id in attachments:
+            _, url = attachments[thumb_id]
+            filename = os.path.basename(url)
+            tpath = os.path.join(media_dir, str(pid), filename)
+            if args.media:
+                if not args.dry_run:
+                    os.makedirs(os.path.dirname(tpath), exist_ok=True)
+                path = download_media_with_prompt(url, tpath, args.dry_run)
+                if not args.dry_run:
+                    cur.execute("INSERT INTO posts_images (post_id, url, title, caption, additional_data) VALUES (?, ?, '', '', ?)",
+                                (pid, os.path.basename(path), json.dumps({"alt": "", "caption": "", "credits": ""})))
+                    fid = cur.lastrowid
+                    cur.execute("UPDATE posts SET featured_image_id=? WHERE id=?", (fid, pid))
+                stats['images'] += 1
+                if args.verbose:
+                    print(f"[IMAGE] Featured image for post {pid} saved as {os.path.basename(path)}")
+
+        for aid, (ppid, aurl) in attachments.items():
+            if ppid == wp_id and aid != thumb_id:
+                fname = os.path.basename(aurl)
+                apath = os.path.join(media_dir, str(pid), fname)
+                if args.verbose:
+                    print(f"[ATTACHMENT] {fname} for post {pid} from {aurl}")
+                if args.media:
+                    if not args.dry_run:
+                        os.makedirs(os.path.dirname(apath), exist_ok=True)
+                    _ = download_media_with_prompt(aurl, apath, args.dry_run)
+                    stats['images'] += 1
+
+        stats['posts' if ptype == "post" else 'pages'] += 1
+
+    if not args.dry_run:
+        conn.commit()  # ensure all data is written before reading it again
+        # generate pages.config.json
+        conn2 = sqlite3.connect(args.db_file)
+        cur2 = conn2.cursor()
+        cur2.execute("SELECT id, status FROM posts")
+        pages = []
+        for row in cur2.fetchall():
+            pid, status = row
+            if 'is-page' in status:
+                pages.append({"id": str(pid), "subpages": []})
+        pages_path = os.path.join(base_dir, "config", "pages.config.json")
+        os.makedirs(os.path.dirname(pages_path), exist_ok=True)
+        with open(pages_path, "w") as f:
+            json.dump(pages, f, indent=4)
+        conn2.close()
+        conn.commit()
+        conn.close()
+    else:
+        print("[INFO] pages.config.json:")
+        print(json.dumps([{"id": i, "subpages": []} for i in range(1, stats['pages'] + 1)], indent=4))
+
+    print("--- Import Summary ---")
+    cat_count = sum(1 for key in category_tags)
+    for k, v in stats.items():
+        if k == "tags":
+            print(f"Tags: {v} ({cat_count} categories)")
+        else:
+            print(f"{k.title()}: {v}")
+    if args.dry_run:
+        print("[INFO] Dry run mode: no changes were written")
+
+if __name__ == "__main__":
+    main()
