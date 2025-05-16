@@ -1,148 +1,124 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 
-set -euo pipefail
+import argparse
+import os
+import sqlite3
+import re
+from pathlib import Path
+from collections import defaultdict
 
-# Default options
-DRY_RUN=true
-DELETE=false
-RESPONSIVE=false
-FORCE_RESPONSIVE=false
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Find and optionally delete unreferenced post media files in a Publii project."
+    )
+    parser.add_argument("project_dir", metavar="PROJECT_DIR", help="Path to the Publii project directory")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be deleted, but don't delete anything (default)")
+    parser.add_argument("--delete", action="store_true", help="Actually delete unreferenced files (overrides --dry-run)")
+    parser.add_argument("--responsive", action="store_true", help="Delete responsive folder only if other files are deleted")
+    parser.add_argument("--force-responsive", action="store_true", help="Always delete responsive folder")
+    return parser.parse_args()
 
-print_help() {
-  cat <<EOF
-Usage: $(basename "$0") [OPTIONS] <PUBLII_DIR>
+def get_referenced_filenames(db_path):
+    referenced = defaultdict(set)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
 
-Find and optionally delete unreferenced post media files in Publii projects.
+    cursor.execute("SELECT post_id, url FROM posts_images WHERE url IS NOT NULL")
+    for post_id, url in cursor.fetchall():
+        filename = os.path.basename(url)
+        referenced[str(post_id)].add(filename)
 
-Options:
-  --dry-run           Default mode. Show which files would be deleted, but do not delete them.
-  --delete            Actually delete unreferenced files (ignored if --dry-run is active).
-  --responsive        Delete the 'responsive/' folder only if other files in the same post are deleted.
-  --force-responsive  Always delete the 'responsive/' folder, even if no other files are deleted.
-  --help              Show this help message and exit.
+    cursor.execute("SELECT id, text FROM posts WHERE text LIKE '%#DOMAIN_NAME#%'")
+    pattern = re.compile(r"#DOMAIN_NAME#([^\\s\"'\\)\\]>]+)")
+    for post_id, text in cursor.fetchall():
+        matches = pattern.findall(text or "")
+        referenced[str(post_id)].update(matches)
 
-Example:
-  $(basename "$0") --delete --responsive /path/to/publii
-EOF
-}
+    conn.close()
+    return referenced
 
-# Argument parsing
-ARGS=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --dry-run) DRY_RUN=true ;;
-    --delete) DELETE=true ;;
-    --responsive) RESPONSIVE=true ;;
-    --force-responsive) FORCE_RESPONSIVE=true ;;
-    --help) print_help; exit 0 ;;
-    -*) echo "❌ Unknown option: $1" >&2; exit 1 ;;
-    *) ARGS+=("$1") ;;
-  esac
-  shift
-done
+def process_post_media(post_path, post_id, referenced_files, dry_run, responsive_flag, force_responsive):
+    unreferenced = []
+    responsive_deleted = False
 
-if [[ ${#ARGS[@]} -ne 1 ]]; then
-  echo "❌ Error: You must provide exactly one Publii directory."
-  echo "ℹ️  Try --help for usage information."
-  exit 1
-fi
+    for root, dirs, files in os.walk(post_path):
+        rel_root = os.path.relpath(root, post_path)
+        if rel_root == "responsive" and not force_responsive and not responsive_flag:
+            continue
+        for file in files:
+            rel_path = os.path.join(rel_root, file) if rel_root != '.' else file
+            if rel_path.startswith("responsive/") and not (force_responsive or responsive_flag):
+                continue
+            if file not in referenced_files:
+                unreferenced.append(os.path.join(root, file))
 
-PUBLII_DIR="${ARGS[0]}"
+    if unreferenced:
+        print(f"📂 Unreferenced files in post {post_id}:")
+        for path in unreferenced:
+            print(f"  🗃️  {path}")
+            if not dry_run:
+                os.remove(path)
 
-if [[ ! -d "$PUBLII_DIR" ]]; then
-  echo "❌ Error: '$PUBLII_DIR' is not a valid directory."
-  exit 1
-fi
+    responsive_path = os.path.join(post_path, "responsive")
+    if os.path.isdir(responsive_path):
+        if force_responsive or (responsive_flag and unreferenced):
+            print(f"🧹 Deleting responsive folder in post {post_id}: {responsive_path}")
+            if not dry_run:
+                for root, dirs, files in os.walk(responsive_path, topdown=False):
+                    for f in files:
+                        os.remove(os.path.join(root, f))
+                    for d in dirs:
+                        os.rmdir(os.path.join(root, d))
+                os.rmdir(responsive_path)
+            responsive_deleted = True
 
-# Summary counters
-declare -A summary_counts
-total_count=0
+    return len(unreferenced), responsive_deleted
 
-find_unreferenced_files() {
-  local site_path="$1"
-  local db_path="$site_path/input/db.sqlite"
-  local media_root="$site_path/input/media/posts"
+def main():
+    args = parse_args()
+    project_dir = Path(args.project_dir).resolve()
+    db_path = project_dir / "input" / "db.sqlite"
+    media_root = project_dir / "input" / "media" / "posts"
 
-  if [[ ! -f "$db_path" ]]; then
-    echo "⚠️  Skipping: No database found in $site_path"
-    return
-  fi
+    if not db_path.is_file():
+        print(f"❌ Error: {db_path} does not exist.")
+        return
+    if not media_root.is_dir():
+        print(f"❌ Error: {media_root} does not exist.")
+        return
 
-  echo "🔍 Scanning site: $site_path"
+    print(f"🔍 Scanning project: {project_dir.name}")
+    referenced = get_referenced_filenames(str(db_path))
 
-  # Fetch referenced image filenames from the database
-  declare -A referenced_files_by_post
-  while IFS='|' read -r post_id filename; do
-    referenced_files_by_post["$post_id"]+="$filename"$'\n'
-  done < <(sqlite3 -separator '|' "$db_path" "SELECT post_id, url FROM posts_images WHERE url IS NOT NULL;")
+    dry_run = not args.delete
+    total_count = 0
+    summary = {}
 
-  # Iterate over each post media folder
-  for post_dir in "$media_root"/*/; do
-    [[ -d "$post_dir" ]] || continue
-    post_dir="${post_dir%/}"  # Remove trailing slash
-    post_id=$(basename "$post_dir")
-    referenced_files="${referenced_files_by_post[$post_id]}"
-    found_unreferenced=false
-    files_to_delete=()
+    for post_dir in media_root.iterdir():
+        if not post_dir.is_dir():
+            continue
+        post_id = post_dir.name
+        ref_files = referenced.get(post_id, set())
+        deleted, responsive_deleted = process_post_media(
+            str(post_dir), post_id, ref_files,
+            dry_run, args.responsive, args.force_responsive
+        )
+        if deleted or responsive_deleted:
+            summary[post_id] = summary.get(post_id, 0) + deleted + (1 if responsive_deleted else 0)
+            total_count += deleted + (1 if responsive_deleted else 0)
 
-    while IFS= read -r -d '' file; do
-      rel_file="${file#$post_dir}"
-      rel_file="${rel_file#/}"  # Remove leading slash
-      [[ "$rel_file" == responsive/* ]] && continue
+    print()
+    if summary:
+        print("📊 ========= SUMMARY =========")
+        for post_id, count in summary.items():
+            print(f"📝 Post {post_id}: {count} unreferenced file(s)")
+        print(f"📦 Total: {total_count} unreferenced file(s)")
+        print("==============================")
+    else:
+        print("✅ No unreferenced files found.")
 
-      if ! grep -Fxq "$rel_file" <<< "$referenced_files"; then
-        files_to_delete+=("$file")
-        found_unreferenced=true
-      fi
-    done < <(find "$post_dir" -type f -print0)
+    print()
+    print("✅ Deletion complete." if not dry_run else "🧪 Dry-run complete. No files were deleted.")
 
-    if [[ ${#files_to_delete[@]} -gt 0 ]]; then
-      echo "📂 Unreferenced files in post $post_id:"
-      for file in "${files_to_delete[@]}"; do
-        echo "  🗃️  $file"
-        summary_counts["$post_id"]=$(( ${summary_counts["$post_id"]:-0} + 1 ))
-        total_count=$((total_count + 1))
-        $DRY_RUN || rm -f -- "$file"
-      done
-    fi
-
-    # Handle responsive/ folder deletion
-    responsive_dir="$post_dir/responsive"
-    if [[ -d "$responsive_dir" ]]; then
-      if $FORCE_RESPONSIVE || { $RESPONSIVE && $found_unreferenced; }; then
-        echo "🧹 Deleting responsive folder in post $post_id: $responsive_dir"
-        summary_counts["$post_id"]=$(( ${summary_counts["$post_id"]:-0} + 1 ))
-        total_count=$((total_count + 1))
-        $DRY_RUN || rm -rf -- "$responsive_dir"
-      fi
-    fi
-  done
-}
-
-# Process each site
-for site_dir in "$PUBLII_DIR"/sites/*; do
-  [[ -d "$site_dir" ]] || continue
-  find_unreferenced_files "$site_dir"
-done
-
-# Print summary
-echo
-if [[ ${#summary_counts[@]} -gt 0 ]]; then
-  echo "📊 ========= SUMMARY ========="
-  for pid in "${!summary_counts[@]}"; do
-    echo "📝 Post $pid: ${summary_counts[$pid]} unreferenced file(s)"
-  done
-  echo "📦 Total: $total_count unreferenced file(s)"
-  echo "=============================="
-else
-  echo "✅ No unreferenced files found."
-fi
-
-echo
-
-# Final status message
-if $DRY_RUN; then
-  echo "🧪 Dry-run complete. No files were deleted."
-else
-  echo "✅ Deletion complete."
-fi
+if __name__ == "__main__":
+    main()

@@ -1,8 +1,8 @@
 # publii-shrink
 
-🧹 A shell tool to detect and optionally delete unreferenced media files in [Publii](https://getpublii.com/) sites.
+🧹 A Python-based tool to detect and optionally delete unreferenced media files in [Publii](https://getpublii.com/) sites.
 
-**Version:** 0.1.0  
+**Version:** 0.3.6  
 **License:** GPLv3  
 **Author:** [HowToMeetLadies](https://github.com/HowToMeetLadies)
 
@@ -10,102 +10,110 @@
 
 ## ⚠️ Warning
 
-This tool operates **directly on the `input/` folders** of your Publii sites.  
-If a bug or misconfiguration occurs, it may delete media files irreversibly.
+This tool operates **directly on your Publii project directory** (`input/` folder).  
+If misconfigured, it may irreversibly delete media files.
 
-> Always make sure you have a **current backup** of your project before using this tool with `--delete`.  
-> I accept **no responsibility** for any damage or data loss – **you have been warned**.
+> Always make a backup before using this tool with `--delete`.  
+> The author accepts **no liability** for data loss or project damage.
 
 ---
 
 ## ✨ Features
 
-- Scans all sites under `sites/*` in your Publii root directory
-- Detects files in `input/media/posts/<post_id>/` that are **not referenced** in the database (`posts_images.url`)
-- Supports dry-run and actual deletion modes
+- Scans a single Publii project directory
+- Detects files in `input/media/posts/<post_id>/` that are **not referenced** in the database:
+  - via `posts_images.url`
+  - via `#DOMAIN_NAME#filename.ext` in `posts.text`
+- Supports dry-run and deletion modes
 - Handles `responsive/` subfolders:
-  - Delete only if needed (`--responsive`)
+  - Delete only if others are removed (`--responsive`)
   - Always delete (`--force-responsive`)
-- Outputs a summary with per-post file counts and a total
+- Summarizes changes per post and in total
 
 ---
 
 ## 📦 Installation
 
-Copy the `publii-shrink` script to your local tool directory and make it executable:
+Place `publii-shrink` into your tool path and make it executable:
 
 ```bash
 chmod +x publii-shrink
 ```
+
+It requires Python 3.6+ and standard libraries.
 
 ---
 
 ## 🚀 Usage
 
 ```bash
-./publii-shrink [OPTIONS] <PUBLII_DIR>
+./publii-shrink [OPTIONS] <PROJECT_DIR>
 ```
 
-`<PUBLII_DIR>` must be the root of your Publii project (i.e. the directory containing `sites/`).
+`<PROJECT_DIR>` must point to a single Publii project folder  
+(e.g. `~/Documents/Publii/sites/mysite`)
 
 ---
 
 ## 🛠 Options
 
-| Option               | Description                                                                  |
-|----------------------|------------------------------------------------------------------------------|
-| `--dry-run`          | 🔍 Show which files would be deleted, without deleting anything (default)    |
-| `--delete`           | 🗑️  Actually delete unreferenced files                                       |
-| `--responsive`       | 🧹 Delete `responsive/` folder only if other files in that post are deleted   |
-| `--force-responsive` | 🔥 Always delete the `responsive/` folder, even if nothing else is deleted    |
-| `--help`             | 📖 Show help and exit                                                         |
+| Option               | Description                                                                 |
+|----------------------|-----------------------------------------------------------------------------|
+| `--dry-run`          | 🔍 Show which files would be deleted (default)                              |
+| `--delete`           | 🗑️  Actually delete unreferenced files                                      |
+| `--responsive`       | 🧹 Delete `responsive/` folder only if other files in the same post are deleted |
+| `--force-responsive` | 🔥 Always delete `responsive/`, even if no other files are deleted          |
+| `--help`             | 📖 Show help and exit                                                        |
 
 ---
 
 ## 🔍 Examples
 
-### Just show what would be deleted (default)
+Dry-run (default):
 
 ```bash
-./publii-shrink /path/to/publii
+./publii-shrink ~/Documents/Publii/sites/my-site
 ```
 
-### Delete unreferenced files
+Delete unreferenced files:
 
 ```bash
-./publii-shrink --delete /path/to/publii
+./publii-shrink --delete ~/Documents/Publii/sites/my-site
 ```
 
-### Delete files and only clean `responsive/` if needed
+Delete files and responsive folders if needed:
 
 ```bash
-./publii-shrink --delete --responsive /path/to/publii
+./publii-shrink --delete --responsive ~/Documents/Publii/sites/my-site
 ```
 
-### Always remove `responsive/` folders, even if nothing else is deleted
+Always delete responsive folders:
 
 ```bash
-./publii-shrink --delete --force-responsive /path/to/publii
+./publii-shrink --delete --force-responsive ~/Documents/Publii/sites/my-site
 ```
 
 ---
 
 ## 🧠 Behavior Details
 
-- Only files in `input/media/posts/<post_id>/` are checked
-- Referenced filenames are taken from the `posts_images.url` column (no subpath)
-- `responsive/` folders are ignored unless:
-  - `--responsive` is passed **and** other files in the post are deleted
-  - or `--force-responsive` is passed
-- If both `--dry-run` and `--delete` are given, `--dry-run` wins
+- Only files inside `input/media/posts/<post_id>/` are considered
+- Referenced media includes:
+  - Filenames in `posts_images.url`
+  - Filenames embedded via `#DOMAIN_NAME#filename` in `posts.text`
+- The tool compares **plain filenames**, not full paths
+- Responsive folders are excluded unless:
+  - `--responsive` is given **and** other files are deleted
+  - `--force-responsive` is given
+- If both `--dry-run` and `--delete` are passed, dry-run takes precedence
 
 ---
 
 ## ✅ Requirements
 
-- Bash 4+
-- SQLite3 CLI (`sqlite3`)
-- Compatible with Linux, macOS, and WSL
+- Python 3.6+
+- No third-party libraries required
+- Works on Linux, macOS, and WSL
 
 ---
 
@@ -119,6 +127,6 @@ See the [LICENSE](./LICENSE) file or visit:
 
 ## 🤝 Contributions
 
-Bug reports, improvements, and pull requests are welcome!
+Pull requests, bug reports, and suggestions welcome!
 
-> `publii-shrink` is part of [publii-tools](https://github.com/HowToMeetLadies/publii-tools)
+> `publii-shrink` is part of the [publii-tools](https://github.com/HowToMeetLadies/publii-tools) collection.
